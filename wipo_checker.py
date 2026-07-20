@@ -292,13 +292,15 @@ class WipoClient:
                               headers=headers, cookies=cookies, timeout=60)
             if r.status_code == 401:
                 return (office, None, "401")
+            if r.status_code == 403:
+                return (office, None, "403")
             r.raise_for_status()
             return (office, self._decrypt(r.text), None)
         except Exception as e:
             return (office, None, str(e))
 
     def search(self, term, status=DEFAULT_STATUS, nice_class=DEFAULT_NICE_CLASS,
-               offices=None, rows=20, per_office=True):
+               offices=None, rows=20, per_office=False):
         if not self.authenticated:
             raise RuntimeError("Not authenticated.")
         offices = offices or DEFAULT_OFFICES
@@ -336,6 +338,10 @@ class WipoClient:
                     if error == "401":
                         retry.append(office)
                         self.had_auth_error = True
+                    elif error == "403":
+                        retry.append(office)
+                        self.had_auth_error = True
+                        self.log(f"  403 blocked on office {office}, will retry")
                     elif error:
                         self.log(f"  Warning: office {office} failed: {error}")
                     elif data:
@@ -374,19 +380,25 @@ class WipoClient:
         }
         r = self._raw_search(body)
         for retry in range(3):
-            if r.status_code != 401:
+            if r.status_code not in (401, 403):
                 break
-            wait = 3 + retry * 5
-            self.log(f"  Session expired (401), wait {wait}s "
-                     f"(attempt {retry+1}/3)...")
-            self.authenticated = False
-            time.sleep(wait)
-            if self.authenticate():
+            wait = 5 + retry * 10
+            if r.status_code == 401:
+                self.log(f"  Session expired (401), wait {wait}s "
+                         f"(attempt {retry+1}/3)...")
+                self.authenticated = False
+                time.sleep(wait)
+                if self.authenticate():
+                    r = self._raw_search(body)
+                elif retry < 2:
+                    continue
+                else:
+                    raise RuntimeError("Re-authentication failed after 3 attempts")
+            else:  # 403
+                self.log(f"  Rate limited (403), wait {wait}s "
+                         f"(attempt {retry+1}/3)...")
+                time.sleep(wait)
                 r = self._raw_search(body)
-            elif retry < 2:
-                continue
-            else:
-                raise RuntimeError("Re-authentication failed after 3 attempts")
         r.raise_for_status()
         return self._decrypt(r.text)
 
@@ -443,9 +455,9 @@ def check_text(
     offices: list[str] | None = None,
     nice_class: str = DEFAULT_NICE_CLASS,
     status: str = DEFAULT_STATUS,
-    delay: float = 1.0,
+    delay: float = 3.0,
     max_terms: Optional[int] = None,
-    per_office: bool = True,
+    per_office: bool = False,
     offset: int = 0,
     limit: int = 0,
     progress_callback: Callable[[int, int, str], None] = None,
@@ -515,12 +527,12 @@ def check_text(
             had_error = True
 
         if had_error or client.had_auth_error:
-            current_delay = min(current_delay + 0.5, 3.0)
+            current_delay = min(current_delay + 1.0, 8.0)
             consecutive_success = 0
         else:
             consecutive_success += 1
-            if consecutive_success >= 10 and current_delay > 0.5:
-                current_delay = max(current_delay - 0.5, 0.5)
+            if consecutive_success >= 10 and current_delay > delay:
+                current_delay = max(current_delay - 0.5, delay)
                 consecutive_success = 0
                 log(f"  Delay reduced to {current_delay}s")
 

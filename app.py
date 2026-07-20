@@ -27,8 +27,8 @@ with st.sidebar:
     status = st.selectbox("商标状态",
                           ["Registered", "Pending", "Ended", "Expired"],
                           index=0)
-    delay = st.slider("请求间隔 (秒)", 0.5, 5.0, 1.0, 0.5,
-                      help="自适应调节，遇到限流会自动增加")
+    delay = st.slider("请求间隔 (秒)", 1.0, 10.0, 3.0, 0.5,
+                      help="建议 3 秒以上，遇到 403 限流会自动增加")
 
 # --- Main Area ---
 st.title("WIPO 商标风险排查工具")
