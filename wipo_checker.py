@@ -300,7 +300,7 @@ class WipoClient:
             return (office, None, str(e))
 
     def search(self, term, status=DEFAULT_STATUS, nice_class=DEFAULT_NICE_CLASS,
-               offices=None, rows=20, per_office=False):
+               offices=None, rows=20, per_office=True):
         if not self.authenticated:
             raise RuntimeError("Not authenticated.")
         offices = offices or DEFAULT_OFFICES
@@ -324,35 +324,30 @@ class WipoClient:
                     self.log(f"  Re-auth failed, skipping: {remaining}")
                     break
 
-            with concurrent.futures.ThreadPoolExecutor(
-                max_workers=min(5, len(remaining))
-            ) as executor:
-                futures = {
-                    executor.submit(self._query_office, o, term,
-                                    status, nice_class, rows): o
-                    for o in remaining
-                }
-                retry = []
-                for future in concurrent.futures.as_completed(futures):
-                    office, data, error = future.result()
-                    if error == "401":
-                        retry.append(office)
-                        self.had_auth_error = True
-                    elif error == "403":
-                        retry.append(office)
-                        self.had_auth_error = True
-                        self.log(f"  403 blocked on office {office}, will retry")
-                    elif error:
-                        self.log(f"  Warning: office {office} failed: {error}")
-                    elif data:
-                        for d in data.get("response", {}).get("docs", []):
-                            key = (d.get("st13")
-                                   or d.get("registrationNumber")
-                                   or str(d.get("brandName")))
-                            if key not in seen:
-                                seen.add(key)
-                                all_docs.append(d)
-                remaining = retry
+            retry = []
+            for idx, office in enumerate(remaining):
+                if idx > 0:
+                    time.sleep(2)
+                o_result, data, error = self._query_office(
+                    office, term, status, nice_class, rows)
+                if error == "401":
+                    retry.append(office)
+                    self.had_auth_error = True
+                elif error == "403":
+                    retry.append(office)
+                    self.had_auth_error = True
+                    self.log(f"  403 blocked on office {office}, will retry")
+                elif error:
+                    self.log(f"  Warning: office {office} failed: {error}")
+                elif data:
+                    for d in data.get("response", {}).get("docs", []):
+                        key = (d.get("st13")
+                               or d.get("registrationNumber")
+                               or str(d.get("brandName")))
+                        if key not in seen:
+                            seen.add(key)
+                            all_docs.append(d)
+            remaining = retry
 
         if remaining:
             self.log(f"  Could not query offices: {remaining}")
@@ -457,7 +452,7 @@ def check_text(
     status: str = DEFAULT_STATUS,
     delay: float = 3.0,
     max_terms: Optional[int] = None,
-    per_office: bool = False,
+    per_office: bool = True,
     offset: int = 0,
     limit: int = 0,
     progress_callback: Callable[[int, int, str], None] = None,
