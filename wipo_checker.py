@@ -98,14 +98,17 @@ def find_node_modules() -> str:
 
 
 def ensure_crypto_js(log: Callable[[str], None] = print) -> None:
-    """Install crypto-js npm package if not already available."""
+    """Ensure crypto-js is available (bundled copy or via npm install)."""
+    script_dir = Path(__file__).parent
+    # Streamlit Cloud / bundled copy: no npm needed
+    if (script_dir / "crypto-js.min.js").is_file():
+        return
     if find_node_modules():
         return
     log("Installing crypto-js (one-time setup)...")
     npm = shutil.which("npm") or shutil.which("npm.cmd")
     if not npm:
         raise FileNotFoundError("npm not found. Please install Node.js with npm.")
-    script_dir = Path(__file__).parent
     result = subprocess.run(
         [npm, "install", "crypto-js"],
         cwd=str(script_dir),
