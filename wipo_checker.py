@@ -560,13 +560,16 @@ def check_text(
     return {"risks": risks, "failed_terms": failed_terms}
 
 
-def generate_report(text, risks, offices, nice_class, status) -> str:
+def generate_report(text, risks, offices, nice_class, status,
+                    total_terms=None) -> str:
+    if total_terms is None:
+        total_terms = len(extract_terms(text))
     lines = [
         "# WIPO 商标风险排查报告", "",
         f"- 排查办公室：{', '.join(offices)}",
         f"- Nice 分类：{nice_class}",
         f"- 状态筛选：{status}",
-        f"- 候选词数：{len(extract_terms(text))}",
+        f"- 候选词数：{total_terms}",
         f"- 风险词数：{len(risks)}", "",
     ]
     if not risks:
