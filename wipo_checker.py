@@ -175,27 +175,14 @@ class WipoClient:
             self.log("Failed to extract uuid from anti-bot page")
             return False
 
-        for attempt in range(5):
-            cr = self.session.get(f"{API_BASE}/captcha", timeout=30)
-            if cr.status_code in (429, 403):
-                wait = 15 + attempt * 15
-                self.log(f"  Captcha {cr.status_code}, waiting {wait}s "
-                         f"(attempt {attempt+1}/5)...")
-                time.sleep(wait)
-                self.session = requests.Session()
-                self._set_headers()
-                r = self.session.get(f"{BASE}{redirect}", timeout=30)
-                uid = self._extract_uuid(r.text)
-                if not uid:
-                    continue
-                continue
-            if cr.status_code != 200:
-                self.log(f"Captcha error: {cr.status_code} {cr.text}")
-                return False
-            ch = cr.json()
-            break
-        else:
+        cr = self.session.get(f"{API_BASE}/captcha", timeout=30)
+        if cr.status_code in (429, 403):
+            self.log(f"  Captcha {cr.status_code}, skipping (no wait)")
             return False
+        if cr.status_code != 200:
+            self.log(f"Captcha error: {cr.status_code} {cr.text}")
+            return False
+        ch = cr.json()
 
         self.log(f"Solving ALTCHA (maxnumber={ch['maxnumber']})...")
         t0 = time.time()
@@ -267,6 +254,7 @@ class WipoClient:
         )
 
     def _query_office(self, office, term, status, nice_class, rows):
+        """Query a single office (thread-safe for concurrent use)."""
         as_structure = {
             "_id": "root", "boolean": "AND",
             "bricks": [
@@ -288,8 +276,12 @@ class WipoClient:
         headers["Content-Type"] = "application/json"
         cookies = self.session.cookies.copy()
         try:
-            r = requests.post(f"{API_BASE}/search", data=json.dumps(body),
-                              headers=headers, cookies=cookies, timeout=60)
+            r = requests.post(
+                f"{API_BASE}/search",
+                data=json.dumps(body),
+                headers=headers, cookies=cookies,
+                timeout=60,
+            )
             if r.status_code == 401:
                 return (office, None, "401")
             if r.status_code == 403:
@@ -300,24 +292,36 @@ class WipoClient:
             return (office, None, str(e))
 
     def search(self, term, status=DEFAULT_STATUS, nice_class=DEFAULT_NICE_CLASS,
-               offices=None, rows=20, per_office=True):
+               offices=None, rows=20):
         if not self.authenticated:
             raise RuntimeError("Not authenticated.")
         offices = offices or DEFAULT_OFFICES
-        if not per_office or len(offices) == 1:
-            return self._search_single(term, status, nice_class, offices, rows)
-
-        all_docs, seen = [], set()
-        remaining = list(offices)
         self.had_auth_error = False
 
-        for attempt in range(3):
+        # Single office: direct query (no concurrency needed)
+        if len(offices) == 1:
+            try:
+                data = self._search_single(term, status, nice_class,
+                                           offices, rows)
+                return {"response": data.get("response", {"docs": []}),
+                        "failed_offices": []}
+            except Exception as e:
+                self.log(f"  Query failed: {e}")
+                return {"response": {"docs": []},
+                        "failed_offices": list(offices)}
+
+        # Multi-office: concurrent queries with 403 retry
+        all_docs, seen = [], set()
+        remaining = list(offices)
+        max_attempts = 2
+
+        for attempt in range(max_attempts):
             if not remaining:
                 break
             if attempt > 0:
                 self.authenticated = False
-                wait = 3 + (attempt - 1) * 5
-                self.log(f"  Re-authenticating (attempt {attempt}/3, "
+                wait = 2  # quick wait before re-auth
+                self.log(f"  Re-authenticating (attempt {attempt}/{max_attempts}, "
                          f"wait {wait}s)...")
                 time.sleep(wait)
                 if not self.authenticate():
@@ -325,37 +329,44 @@ class WipoClient:
                     break
 
             retry = []
-            for idx, office in enumerate(remaining):
-                if idx > 0:
-                    time.sleep(2)
-                o_result, data, error = self._query_office(
-                    office, term, status, nice_class, rows)
-                if error == "401":
-                    retry.append(office)
-                    self.had_auth_error = True
-                elif error == "403":
-                    retry.append(office)
-                    self.had_auth_error = True
-                    self.log(f"  403 blocked on office {office}, will retry")
-                elif error:
-                    self.log(f"  Warning: office {office} failed: {error}")
-                elif data:
-                    for d in data.get("response", {}).get("docs", []):
-                        key = (d.get("st13")
-                               or d.get("registrationNumber")
-                               or str(d.get("brandName")))
-                        if key not in seen:
-                            seen.add(key)
-                            all_docs.append(d)
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=min(5, len(remaining))
+            ) as executor:
+                futures = {
+                    executor.submit(
+                        self._query_office, office, term, status,
+                        nice_class, rows
+                    ): office
+                    for office in remaining
+                }
+                for future in concurrent.futures.as_completed(futures):
+                    office, data, error = future.result()
+                    if error in ("401", "403"):
+                        retry.append(office)
+                        self.had_auth_error = True
+                        if error == "403":
+                            self.log(f"  403 blocked on office {office}, "
+                                     f"will retry")
+                    elif error:
+                        self.log(f"  Warning: office {office} failed: {error}")
+                    elif data:
+                        for d in data.get("response", {}).get("docs", []):
+                            key = (d.get("st13")
+                                   or d.get("registrationNumber")
+                                   or str(d.get("brandName")))
+                            if key not in seen:
+                                seen.add(key)
+                                all_docs.append(d)
             remaining = retry
 
         if remaining:
-            self.log(f"  Could not query offices: {remaining}")
+            self.log(f"  WARNING: Could not query offices: {remaining}")
+
         all_docs.sort(key=lambda d: d.get("score", 0), reverse=True)
-        return {"response": {"docs": all_docs}}
+        return {"response": {"docs": all_docs}, "failed_offices": remaining}
 
     def _search_single(self, term, status=DEFAULT_STATUS,
-                       nice_class=DEFAULT_NICE_CLASS, offices=None, rows=20):
+                       nice_class=DEFAULT_NICE_CLASS, offices=None, rows=100):
         offices = offices or DEFAULT_OFFICES
         as_structure = {
             "_id": "root", "boolean": "AND",
@@ -412,7 +423,7 @@ def extract_terms(text: str, min_len: int = 3) -> list[str]:
         if len(t) >= min_len and re.fullmatch(r"[a-z]+", t) and t not in STOP_WORDS:
             terms.append(t)
 
-    segments = re.split(r"[^a-zA-Z\s]+", text)
+    segments = re.split(r"[^a-zA-Z\s]+|[\r\n]+", text)
     phrases = []
     for seg in segments:
         seg_tokens = re.findall(r"[A-Za-z][A-Za-z0-9']*", seg)
@@ -446,18 +457,18 @@ def classify_match(term: str, brand_name: str) -> str:
 
 
 def check_text(
-    text: str,
+    text: str = "",
     offices: list[str] | None = None,
     nice_class: str = DEFAULT_NICE_CLASS,
     status: str = DEFAULT_STATUS,
-    delay: float = 3.0,
+    delay: float = 2.0,
     max_terms: Optional[int] = None,
-    per_office: bool = True,
     offset: int = 0,
     limit: int = 0,
     progress_callback: Callable[[int, int, str], None] = None,
     log_callback: Callable[[str], None] = None,
-) -> list[dict]:
+    terms: list[str] | None = None,
+) -> dict:
     def log(msg):
         if log_callback:
             log_callback(msg)
@@ -469,7 +480,8 @@ def check_text(
     if not client.authenticate():
         raise RuntimeError("WIPO authentication failed")
 
-    terms = extract_terms(text)
+    if terms is None:
+        terms = extract_terms(text)
     total_terms = len(terms)
     if offset > 0 or limit > 0:
         start = offset
@@ -480,6 +492,7 @@ def check_text(
     log(f"Extracted {total_terms} candidate terms (checking {len(terms)})")
 
     risks = []
+    failed_terms = []
     current_delay = delay
     consecutive_success = 0
     for i, term in enumerate(terms, 1):
@@ -494,13 +507,17 @@ def check_text(
                     break
             else:
                 log(f"  Skipping {term}: re-auth failed")
+                failed_terms.append({"term": term, "offices": list(offices)})
                 continue
         log(f"[{i}/{len(terms)}] Checking: {term}")
         had_error = False
         try:
             data = client.search(term, status=status, nice_class=nice_class,
-                                 offices=offices, per_office=per_office)
+                                 offices=offices)
             docs = data.get("response", {}).get("docs", [])
+            failed = data.get("failed_offices", [])
+            if failed:
+                failed_terms.append({"term": term, "offices": list(failed)})
             docs = [d for d in docs if d.get("status") == status]
             exact_docs = []
             for d in docs:
@@ -520,6 +537,7 @@ def check_text(
         except Exception as e:
             log(f"Error checking {term}: {e}")
             had_error = True
+            failed_terms.append({"term": term, "offices": list(offices)})
 
         if had_error or client.had_auth_error:
             current_delay = min(current_delay + 1.0, 8.0)
@@ -533,7 +551,13 @@ def check_text(
 
         if current_delay:
             time.sleep(current_delay)
-    return risks
+
+    if failed_terms:
+        log(f"WARNING: {len(failed_terms)} terms have offices not fully queried:")
+        for ft in failed_terms:
+            log(f"  '{ft['term']}' — offices: {', '.join(ft['offices'])}")
+
+    return {"risks": risks, "failed_terms": failed_terms}
 
 
 def generate_report(text, risks, offices, nice_class, status) -> str:
