@@ -8,7 +8,6 @@ import hmac
 import hashlib
 import threading
 import streamlit as st
-import streamlit.components.v1 as components
 from wipo_checker import (
     extract_terms, check_text, generate_report,
     ensure_crypto_js, DEFAULT_OFFICES, DEFAULT_NICE_CLASS, DEFAULT_STATUS,
@@ -51,63 +50,49 @@ def _verify_token(token: str) -> str | None:
 
 
 def _set_auth_cookie(token: str):
-    """设置 cookie（不重定向，用于已登录页面）。"""
+    """设置 cookie（st.html 注入主页面 DOM，直接操作 document.cookie）。"""
     js = f"""
     <script>
-    try {{
-        document.cookie = "{COOKIE_NAME}={token}; max-age={COOKIE_MAX_AGE}; path=/; SameSite=Lax";
-    }} catch(e) {{}}
+    document.cookie = "{COOKIE_NAME}={token}; max-age={COOKIE_MAX_AGE}; path=/; SameSite=Lax";
     </script>
     """
-    components.html(js, height=0, width=0)
+    st.html(js)
 
 
 def _clear_auth_cookie():
-    """清除 cookie（不重定向）。"""
+    """清除 cookie。"""
     js = f"""
     <script>
-    try {{
-        document.cookie = "{COOKIE_NAME}=; max-age=0; path=/";
-    }} catch(e) {{}}
+    document.cookie = "{COOKIE_NAME}=; max-age=0; path=/; SameSite=Lax";
     </script>
     """
-    components.html(js, height=0, width=0)
+    st.html(js)
 
 
 def _try_cookie_auth():
-    """页面加载时：如果有 cookie token，自动重定向到带参数的 URL。"""
+    """页面加载时：JS 读 cookie，重定向到带 token 的 URL（两阶段检查第一步）。"""
     js = f"""
     <script>
-    try {{
+    (function() {{
+        var token = null;
         var cookies = document.cookie.split(';');
         for (var i = 0; i < cookies.length; i++) {{
             var c = cookies[i].trim();
             if (c.startsWith("{COOKIE_NAME}=")) {{
-                var token = c.substring({len(COOKIE_NAME) + 1});
-                if (token && !window.parent.location.search.includes('auth_token')) {{
-                    window.parent.location.href = window.parent.location.pathname + '?auth_token=' + encodeURIComponent(token);
-                }}
+                token = c.substring({len(COOKIE_NAME) + 1});
                 break;
             }}
         }}
-    }} catch(e) {{
-        try {{
-            var cookies2 = document.cookie.split(';');
-            for (var j = 0; j < cookies2.length; j++) {{
-                var c2 = cookies2[j].trim();
-                if (c2.startsWith("{COOKIE_NAME}=")) {{
-                    var token2 = c2.substring({len(COOKIE_NAME) + 1});
-                    if (token2 && !window.top.location.search.includes('auth_token')) {{
-                        window.top.location.href = window.top.location.pathname + '?auth_token=' + encodeURIComponent(token2);
-                    }}
-                    break;
-                }}
-            }}
-        }} catch(e2) {{}}
-    }}
+        var url = new URL(window.location.href);
+        url.searchParams.set('cookie_checked', 'true');
+        if (token) {{
+            url.searchParams.set('auth_token', token);
+        }}
+        window.location.replace(url.toString());
+    }})();
     </script>
     """
-    components.html(js, height=0, width=0)
+    st.html(js)
 
 
 def _check_auth(skip_cookie: bool = False) -> str | None:
@@ -122,9 +107,14 @@ def _check_auth(skip_cookie: bool = False) -> str | None:
         if user:
             st.session_state["_auth_user"] = user
             return user
-    # 3) 尝试从 cookie 恢复（JS 异步重定向，本次返回 None）
-    if not skip_cookie:
+    # 3) 两阶段 cookie 检查：
+    #    第一阶段：注入 JS 读 cookie 并重定向（带 cookie_checked 标记）
+    #    第二阶段：cookie_checked 已在 URL 中，说明 JS 已跑过，不再重试
+    cookie_checked = st.query_params.get("cookie_checked")
+    if not skip_cookie and not cookie_checked:
         _try_cookie_auth()
+        st.info("正在检查登录状态...")
+        st.stop()
     return None
 
 
