@@ -69,52 +69,25 @@ def _clear_auth_cookie():
     st.html(js)
 
 
-def _try_cookie_auth():
-    """页面加载时：JS 读 cookie，重定向到带 token 的 URL（两阶段检查第一步）。"""
-    js = f"""
-    <script>
-    (function() {{
-        var token = null;
-        var cookies = document.cookie.split(';');
-        for (var i = 0; i < cookies.length; i++) {{
-            var c = cookies[i].trim();
-            if (c.startsWith("{COOKIE_NAME}=")) {{
-                token = c.substring({len(COOKIE_NAME) + 1});
-                break;
-            }}
-        }}
-        var url = new URL(window.location.href);
-        url.searchParams.set('cookie_checked', 'true');
-        if (token) {{
-            url.searchParams.set('auth_token', token);
-        }}
-        window.location.replace(url.toString());
-    }})();
-    </script>
+def _check_auth() -> str | None:
+    """检查当前是否已登录，返回 username 或 None。
+
+    注：cookie 自动登录已降级为"浏览器记住密码"模式。
+    之前用 JS 重定向实现 cookie token 的方案在 Streamlit Cloud 的
+    st.html() 中不可靠，会导致页面卡在"正在检查登录状态"。
+    现在登录页表单的 autocomplete 属性会提示浏览器记住账号密码，
+    重新打开网页时浏览器可自动填充，点登录即可。
     """
-    st.html(js)
-
-
-def _check_auth(skip_cookie: bool = False) -> str | None:
-    """检查当前是否已登录，返回 username 或 None。"""
     # 1) session_state 已有
     if st.session_state.get("_auth_user"):
         return st.session_state["_auth_user"]
-    # 2) query_params 有 token
+    # 2) query_params 有 token（页面刷新或 URL 分享了 token）
     token = st.query_params.get("auth_token")
     if token:
         user = _verify_token(token)
         if user:
             st.session_state["_auth_user"] = user
             return user
-    # 3) 两阶段 cookie 检查：
-    #    第一阶段：注入 JS 读 cookie 并重定向（带 cookie_checked 标记）
-    #    第二阶段：cookie_checked 已在 URL 中，说明 JS 已跑过，不再重试
-    cookie_checked = st.query_params.get("cookie_checked")
-    if not skip_cookie and not cookie_checked:
-        _try_cookie_auth()
-        st.info("正在检查登录状态...")
-        st.stop()
     return None
 
 
@@ -125,8 +98,10 @@ def _do_login():
     st.divider()
 
     with st.form("login_form"):
-        username = st.text_input("用户名")
-        password = st.text_input("密码", type="password")
+        # autocomplete 让浏览器提示"记住密码"，下次自动填充
+        username = st.text_input("用户名", autocomplete="username")
+        password = st.text_input("密码", type="password",
+                                 autocomplete="current-password")
         submitted = st.form_submit_button("登录", type="primary",
                                           use_container_width=True)
         if submitted:
@@ -149,7 +124,7 @@ if _is_clearing:
     _clear_auth_cookie()
 
 # --- 登录门禁 ---
-_current_user = _check_auth(skip_cookie=_is_clearing)
+_current_user = _check_auth()
 if not _current_user:
     _do_login()
 username = _current_user
