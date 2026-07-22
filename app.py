@@ -8,6 +8,7 @@ import hmac
 import hashlib
 import threading
 import streamlit as st
+import streamlit.components.v1 as components
 from wipo_checker import (
     extract_terms, check_text, generate_report,
     ensure_crypto_js, DEFAULT_OFFICES, DEFAULT_NICE_CLASS, DEFAULT_STATUS,
@@ -17,10 +18,12 @@ st.set_page_config(page_title="WIPO 商标风险排查", page_icon="🔍",
                    layout="wide")
 
 # ============================================================
-#  Auth: HMAC 签名 token + st.query_params 持久化 (7天)
+#  Auth: HMAC 签名 token + cookie 持久化 (7天)
 # ============================================================
 
 AUTH_SECRET = st.secrets.get("auth_secret", "wipo-change-this-secret")
+COOKIE_NAME = "wipo_auth"
+COOKIE_MAX_AGE = 7 * 86400  # 7 天 (秒)
 
 
 def _create_token(username: str, expiry_days: int = 7) -> str:
@@ -47,6 +50,77 @@ def _verify_token(token: str) -> str | None:
         return None
 
 
+def _set_auth_cookie_and_redirect(token: str):
+    """登录成功后：设置 cookie 并重定向到带 token 的 URL。"""
+    js = f"""
+    <script>
+    try {{
+        document.cookie = "{COOKIE_NAME}={token}; max-age={COOKIE_MAX_AGE}; path=/; SameSite=Lax";
+    }} catch(e) {{}}
+    try {{
+        var base = window.parent.location.pathname;
+        window.parent.location.href = base + '?auth_token=' + encodeURIComponent('{token}');
+    }} catch(e) {{
+        try {{ window.top.location.href = window.top.location.pathname + '?auth_token=' + encodeURIComponent('{token}'); }} catch(e2) {{}}
+    }}
+    </script>
+    """
+    components.html(js, height=0, width=0)
+
+
+def _clear_auth_cookie_and_redirect():
+    """退出登录：清除 cookie 并重定向到基础 URL。"""
+    js = f"""
+    <script>
+    try {{
+        document.cookie = "{COOKIE_NAME}=; max-age=0; path=/";
+    }} catch(e) {{}}
+    try {{
+        window.parent.location.href = window.parent.location.pathname;
+    }} catch(e) {{
+        try {{ window.top.location.href = window.top.location.pathname; }} catch(e2) {{}}
+    }}
+    </script>
+    """
+    components.html(js, height=0, width=0)
+
+
+def _try_cookie_auth():
+    """页面加载时：如果有 cookie token，自动重定向到带参数的 URL。"""
+    js = f"""
+    <script>
+    try {{
+        var cookies = document.cookie.split(';');
+        for (var i = 0; i < cookies.length; i++) {{
+            var c = cookies[i].trim();
+            if (c.startsWith("{COOKIE_NAME}=")) {{
+                var token = c.substring({len(COOKIE_NAME) + 1});
+                if (token && !window.parent.location.search.includes('auth_token')) {{
+                    window.parent.location.href = window.parent.location.pathname + '?auth_token=' + encodeURIComponent(token);
+                }}
+                break;
+            }}
+        }}
+    }} catch(e) {{
+        try {{
+            var cookies2 = document.cookie.split(';');
+            for (var j = 0; j < cookies2.length; j++) {{
+                var c2 = cookies2[j].trim();
+                if (c2.startsWith("{COOKIE_NAME}=")) {{
+                    var token2 = c2.substring({len(COOKIE_NAME) + 1});
+                    if (token2 && !window.top.location.search.includes('auth_token')) {{
+                        window.top.location.href = window.top.location.pathname + '?auth_token=' + encodeURIComponent(token2);
+                    }}
+                    break;
+                }}
+            }}
+        }} catch(e2) {{}}
+    }}
+    </script>
+    """
+    components.html(js, height=0, width=0)
+
+
 def _check_auth() -> str | None:
     """检查当前是否已登录，返回 username 或 None。"""
     # 1) session_state 已有
@@ -59,6 +133,8 @@ def _check_auth() -> str | None:
         if user:
             st.session_state["_auth_user"] = user
             return user
+    # 3) 尝试从 cookie 恢复（JS 异步重定向，本次返回 None）
+    _try_cookie_auth()
     return None
 
 
@@ -77,9 +153,9 @@ def _do_login():
             users = st.secrets.get("users", {})
             if username in users and users[username] == password:
                 token = _create_token(username)
-                st.query_params["auth_token"] = token
                 st.session_state["_auth_user"] = username
-                st.rerun()
+                _set_auth_cookie_and_redirect(token)
+                st.stop()
             else:
                 st.error("用户名或密码错误")
 
@@ -221,9 +297,10 @@ for key in ("risks", "report", "elapsed", "total_terms", "failed_terms",
 with st.sidebar:
     st.markdown(f"👤 **{username}**")
     if st.button("退出登录", use_container_width=True):
-        st.query_params.clear()
         st.session_state.pop("_auth_user", None)
-        st.rerun()
+        st.query_params.clear()
+        _clear_auth_cookie_and_redirect()
+        st.stop()
 
     st.divider()
     st.header("设置")
