@@ -269,6 +269,7 @@ with col1:
             terms = extract_terms(text)
             st.session_state["all_terms"] = terms
             st.session_state["selected_terms"] = list(terms)
+            st.session_state.pop("term_selector", None)
             st.rerun()
 
 with col2:
