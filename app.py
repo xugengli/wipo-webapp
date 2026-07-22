@@ -50,36 +50,25 @@ def _verify_token(token: str) -> str | None:
         return None
 
 
-def _set_auth_cookie_and_redirect(token: str):
-    """登录成功后：设置 cookie 并重定向到带 token 的 URL。"""
+def _set_auth_cookie(token: str):
+    """设置 cookie（不重定向，用于已登录页面）。"""
     js = f"""
     <script>
     try {{
         document.cookie = "{COOKIE_NAME}={token}; max-age={COOKIE_MAX_AGE}; path=/; SameSite=Lax";
     }} catch(e) {{}}
-    try {{
-        var base = window.parent.location.pathname;
-        window.parent.location.href = base + '?auth_token=' + encodeURIComponent('{token}');
-    }} catch(e) {{
-        try {{ window.top.location.href = window.top.location.pathname + '?auth_token=' + encodeURIComponent('{token}'); }} catch(e2) {{}}
-    }}
     </script>
     """
     components.html(js, height=0, width=0)
 
 
-def _clear_auth_cookie_and_redirect():
-    """退出登录：清除 cookie 并重定向到基础 URL。"""
+def _clear_auth_cookie():
+    """清除 cookie（不重定向）。"""
     js = f"""
     <script>
     try {{
         document.cookie = "{COOKIE_NAME}=; max-age=0; path=/";
     }} catch(e) {{}}
-    try {{
-        window.parent.location.href = window.parent.location.pathname;
-    }} catch(e) {{
-        try {{ window.top.location.href = window.top.location.pathname; }} catch(e2) {{}}
-    }}
     </script>
     """
     components.html(js, height=0, width=0)
@@ -121,7 +110,7 @@ def _try_cookie_auth():
     components.html(js, height=0, width=0)
 
 
-def _check_auth() -> str | None:
+def _check_auth(skip_cookie: bool = False) -> str | None:
     """检查当前是否已登录，返回 username 或 None。"""
     # 1) session_state 已有
     if st.session_state.get("_auth_user"):
@@ -134,7 +123,8 @@ def _check_auth() -> str | None:
             st.session_state["_auth_user"] = user
             return user
     # 3) 尝试从 cookie 恢复（JS 异步重定向，本次返回 None）
-    _try_cookie_auth()
+    if not skip_cookie:
+        _try_cookie_auth()
     return None
 
 
@@ -154,19 +144,29 @@ def _do_login():
             if username in users and users[username] == password:
                 token = _create_token(username)
                 st.session_state["_auth_user"] = username
-                _set_auth_cookie_and_redirect(token)
-                st.stop()
+                st.session_state["_pending_cookie_token"] = token
+                st.query_params["auth_token"] = token
+                st.rerun()
             else:
                 st.error("用户名或密码错误")
 
     st.stop()
 
 
+# --- Cookie 操作（登录门禁前：清除退出登录的 cookie）---
+_is_clearing = st.session_state.pop("_pending_cookie_clear", False)
+if _is_clearing:
+    _clear_auth_cookie()
+
 # --- 登录门禁 ---
-_current_user = _check_auth()
+_current_user = _check_auth(skip_cookie=_is_clearing)
 if not _current_user:
     _do_login()
 username = _current_user
+
+# --- Cookie 操作（登录后：设置 cookie 供下次自动登录）---
+if st.session_state.get("_pending_cookie_token"):
+    _set_auth_cookie(st.session_state.pop("_pending_cookie_token"))
 
 # ============================================================
 #  Global State: 跨 session 共享的锁 + 排队状态
@@ -298,9 +298,9 @@ with st.sidebar:
     st.markdown(f"👤 **{username}**")
     if st.button("退出登录", use_container_width=True):
         st.session_state.pop("_auth_user", None)
+        st.session_state["_pending_cookie_clear"] = True
         st.query_params.clear()
-        _clear_auth_cookie_and_redirect()
-        st.stop()
+        st.rerun()
 
     st.divider()
     st.header("设置")
