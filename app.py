@@ -13,7 +13,7 @@ from wipo_checker import (
     ensure_crypto_js, DEFAULT_OFFICES, DEFAULT_NICE_CLASS, DEFAULT_STATUS,
 )
 
-st.set_page_config(page_title="WIPO 商标风险排查", page_icon="🔍",
+st.set_page_config(page_title="WIPO侵权风险排查", page_icon="🔍",
                    layout="wide")
 
 # ============================================================
@@ -93,7 +93,7 @@ def _check_auth() -> str | None:
 
 def _do_login():
     """渲染登录页面。"""
-    st.title("WIPO 商标风险排查工具")
+    st.title("WIPO侵权风险排查")
     st.markdown("请登录后使用。")
     st.divider()
 
@@ -285,7 +285,7 @@ with st.sidebar:
 #  Main Area
 # ============================================================
 
-st.title("WIPO 商标风险排查工具")
+st.title("WIPO侵权风险排查")
 st.markdown("输入产品描述或营销文案，自动排查其中可能涉及 "
             "WIPO 注册商标的风险词汇。")
 
